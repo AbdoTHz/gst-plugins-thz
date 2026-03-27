@@ -40,7 +40,10 @@ static void* dbus_worker_thread(void* data) {
     GstTHZMeta *self = GST_META_PLUGIN(data);
     try {
         auto connection = sdbus::createSessionBusConnection();
-        auto proxy = sdbus::createProxy(*connection, "com.embedded.DetectionSystem", "/com/embedded/DetectionSystem");
+        // This works in both sdbus-c++ v1.x and v2.x
+        auto proxy = sdbus::createProxy(*connection, 
+                                sdbus::ServiceName{"com.embedded.DetectionSystem"}, 
+                                sdbus::ObjectPath{"/com/embedded/DetectionSystem"});
         proxy->registerSignalHandler("com.embedded.DetectionSystem.Signals", "NewDetection", 
             [self](sdbus::Signal& sig){ onNewDetection(sig, self); });
         proxy->finishRegistration();
