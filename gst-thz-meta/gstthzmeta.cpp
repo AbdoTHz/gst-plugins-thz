@@ -40,23 +40,27 @@ static void* dbus_worker_thread(void* data) {
     GstTHZMeta *self = GST_META_PLUGIN(data);
     try {
         auto connection = sdbus::createSessionBusConnection();
-        // This works in both sdbus-c++ v1.x and v2.x
+        
+        // Explicit types for v1/v2 compatibility
         auto proxy = sdbus::createProxy(*connection, 
-                                sdbus::ServiceName{"com.embedded.DetectionSystem"}, 
-                                sdbus::ObjectPath{"/com/embedded/DetectionSystem"});
-        proxy->registerSignalHandler("com.embedded.DetectionSystem.Signals", "NewDetection", 
-            [self](sdbus::Signal& sig){ onNewDetection(sig, self); });
-        proxy->finishRegistration();
+                                        sdbus::ServiceName{"com.embedded.DetectionSystem"}, 
+                                        sdbus::ObjectPath{"/com/embedded/DetectionSystem"});
+
+        // Explicit InterfaceName, SignalName, and signal_handler wrapper
+        proxy->registerSignalHandler(
+            sdbus::InterfaceName{"com.embedded.DetectionSystem.Signals"}, 
+            sdbus::SignalName{"NewDetection"}, 
+            sdbus::signal_handler{[self](sdbus::Signal& sig){ onNewDetection(sig, self); }}
+        );
+
+        // finishRegistration() is removed in v2.x; registration is now immediate/automatic.
+        
         std::cout << "[TRACE] DBus Worker Thread Started & Registered" << std::endl;
         connection->enterEventLoop(); 
     } catch (const std::exception& e) {
         std::cerr << "[TRACE] DBus Thread Failed: " << e.what() << std::endl;
     }
     return NULL;
-}
-
-static void metadata_destroyed_notify(gpointer data) {
-    gst_structure_free((GstStructure *)data);
 }
 
 static GstFlowReturn gst_thz_meta_transform_ip(GstBaseTransform *trans, GstBuffer *buf) {
@@ -72,11 +76,6 @@ static GstFlowReturn gst_thz_meta_transform_ip(GstBaseTransform *trans, GstBuffe
     while ((raw_json_ptr = g_async_queue_try_pop(self->metadata_queue)) != NULL) {
         gchar *json_str = (gchar *)raw_json_ptr;
         
-        if (json_str != nullptr) {
-            std::cout << "[DBus Sync] Frame #" << current_camera_frame 
-                      << " Received JSON: " << json_str << std::endl;
-        }
-
         try {
             json data = json::parse(json_str);
 
@@ -125,7 +124,7 @@ static GstFlowReturn gst_thz_meta_transform_ip(GstBaseTransform *trans, GstBuffe
 
             // Attach structure to buffer as Reference Timestamp Meta
             GstCaps *dummy_caps = gst_caps_from_string("thz");
-            gst_buffer_add_reference_timestamp_meta(buf, dummy_caps, (GstClockTime)s, GST_CLOCK_TIME_NONE);
+            gst_buffer_add_reference_timestamp_meta(buf, dummy_caps, (GstClockTime)((uintptr_t)s), GST_CLOCK_TIME_NONE);
             gst_caps_unref(dummy_caps);
             
             // Set cleanup notification so the structure is freed when the buffer is destroyed
@@ -143,7 +142,10 @@ static GstFlowReturn gst_thz_meta_transform_ip(GstBaseTransform *trans, GstBuffe
 /* --- Plugin Boilerplate --- */
 static void gst_thz_meta_finalize(GObject *object) {
     GstTHZMeta *self = GST_META_PLUGIN(object);
-    if (self->metadata_queue) g_async_queue_unref(self->metadata_queue);
+    if (self->metadata_queue) {
+        g_async_queue_unref(self->metadata_queue);
+        self->metadata_queue = nullptr;
+    }
     G_OBJECT_CLASS(gst_thz_meta_parent_class)->finalize(object);
 }
 
