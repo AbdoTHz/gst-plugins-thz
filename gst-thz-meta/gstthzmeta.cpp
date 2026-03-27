@@ -41,20 +41,17 @@ static void* dbus_worker_thread(void* data) {
     try {
         auto connection = sdbus::createSessionBusConnection();
         
-        // Explicit types for v1/v2 compatibility
         auto proxy = sdbus::createProxy(*connection, 
                                         sdbus::ServiceName{"com.embedded.DetectionSystem"}, 
                                         sdbus::ObjectPath{"/com/embedded/DetectionSystem"});
 
-        // Explicit InterfaceName, SignalName, and signal_handler wrapper
+        // FIX: The lambda must take 'sdbus::Signal sig' BY VALUE, not by reference.
         proxy->registerSignalHandler(
             sdbus::InterfaceName{"com.embedded.DetectionSystem.Signals"}, 
             sdbus::SignalName{"NewDetection"}, 
-            sdbus::signal_handler{[self](sdbus::Signal& sig){ onNewDetection(sig, self); }}
+            sdbus::signal_handler{[self](sdbus::Signal sig){ onNewDetection(sig, self); }}
         );
 
-        // finishRegistration() is removed in v2.x; registration is now immediate/automatic.
-        
         std::cout << "[TRACE] DBus Worker Thread Started & Registered" << std::endl;
         connection->enterEventLoop(); 
     } catch (const std::exception& e) {
@@ -65,11 +62,8 @@ static void* dbus_worker_thread(void* data) {
 
 static GstFlowReturn gst_thz_meta_transform_ip(GstBaseTransform *trans, GstBuffer *buf) {
     GstTHZMeta *self = GST_META_PLUGIN(trans);
-    
-    // Increment the camera frame counter for every buffer passing through
     guint64 current_camera_frame = self->internal_frame_count++;
 
-    // If no DBus metadata is available, we just pass through
     if (g_async_queue_length(self->metadata_queue) <= 0) return GST_FLOW_OK;
 
     gpointer raw_json_ptr;
@@ -87,7 +81,6 @@ static GstFlowReturn gst_thz_meta_transform_ip(GstBaseTransform *trans, GstBuffe
             gboolean threat_bool = data.value("threat_detected", false) ? TRUE : FALSE;
             gboolean person_bool = data.value("person_detected", false) ? TRUE : FALSE;
 
-            // Create the structure and include the local 'camera_frame'
             GstStructure *s = gst_structure_new("TeraHertzMeta",
                 "type",            G_TYPE_STRING,  type_val.c_str(),
                 "scan_id",         G_TYPE_STRING,  scan_id.c_str(),
@@ -104,7 +97,6 @@ static GstFlowReturn gst_thz_meta_transform_ip(GstBaseTransform *trans, GstBuffe
                 if (data.contains(key) && data[key].is_array()) {
                     GValue array_val = G_VALUE_INIT;
                     g_value_init(&array_val, GST_TYPE_ARRAY);
-                    
                     for (auto& element : data[key]) {
                         if (!element.is_number()) continue;
                         GValue elem = G_VALUE_INIT;
@@ -118,16 +110,12 @@ static GstFlowReturn gst_thz_meta_transform_ip(GstBaseTransform *trans, GstBuffe
             };
 
             add_float_array("probabilities");
-            for (int i = 1; i <= 6; ++i) {
-                add_float_array("roi" + std::to_string(i));
-            }
+            for (int i = 1; i <= 6; ++i) add_float_array("roi" + std::to_string(i));
 
-            // Attach structure to buffer as Reference Timestamp Meta
             GstCaps *dummy_caps = gst_caps_from_string("thz");
             gst_buffer_add_reference_timestamp_meta(buf, dummy_caps, (GstClockTime)((uintptr_t)s), GST_CLOCK_TIME_NONE);
             gst_caps_unref(dummy_caps);
             
-            // Set cleanup notification so the structure is freed when the buffer is destroyed
             static GQuark cleanup_quark = g_quark_from_static_string("cleanup_notify");
             gst_mini_object_set_qdata(GST_MINI_OBJECT(buf), cleanup_quark, s, (GDestroyNotify)gst_structure_free);
 
@@ -139,7 +127,6 @@ static GstFlowReturn gst_thz_meta_transform_ip(GstBaseTransform *trans, GstBuffe
     return GST_FLOW_OK;
 }
 
-/* --- Plugin Boilerplate --- */
 static void gst_thz_meta_finalize(GObject *object) {
     GstTHZMeta *self = GST_META_PLUGIN(object);
     if (self->metadata_queue) {
