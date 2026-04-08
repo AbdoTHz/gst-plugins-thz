@@ -7,16 +7,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <gst/gst.h>
 #include <gst/video/video.h>
-/* Modern GstVA Headers */
 #include <gst/va/gstva.h>
+#include <gst/allocators/gstdmabuf.h>
 
+/* OpenCL Headers */
 #include <CL/cl.h>
-#include <CL/cl_va_api_media_sharing_intel.h>
+#include <CL/cl_ext.h>
 
-/* Path to your OpenCL kernel file */
 #define KERNEL_PATH "../blur.cl"
 
 #define GST_TYPE_THZ_VAAPI_BLUR (gst_thz_vaapi_blur_get_type())
@@ -27,17 +28,11 @@ struct _GstThzVaapiBlur {
     gint blur_strength;
     gint width, height;
     
-    /* OpenCL Handles */
     cl_context context;
     cl_command_queue queue;
     cl_program program;
     cl_kernel kernel;
     gboolean initialized;
-
-    /* Intel OpenCL Extensions */
-    clCreateFromVA_APIMediaSurfaceINTEL_fn clCreateFromVA_APIMediaSurfaceINTEL;
-    clEnqueueAcquireVA_APIMediaSurfacesINTEL_fn clEnqueueAcquireVA_APIMediaSurfacesINTEL;
-    clEnqueueReleaseVA_APIMediaSurfacesINTEL_fn clEnqueueReleaseVA_APIMediaSurfacesINTEL;
     
     GstVaDisplay *va_display; 
 };
@@ -47,13 +42,20 @@ G_DEFINE_TYPE(GstThzVaapiBlur, gst_thz_vaapi_blur, GST_TYPE_BASE_TRANSFORM);
 
 static gboolean init_opencl(GstThzVaapiBlur *self) {
     cl_uint num_platforms;
-    cl_platform_id platform;
+    cl_platform_id platform = NULL;
+    cl_device_id device = NULL;
     cl_int err;
 
-    g_print("THZ-DEBUG: Initializing OpenCL...\n");
+    cl_platform_id platforms[10];
+    if (clGetPlatformIDs(10, platforms, &num_platforms) != CL_SUCCESS) return FALSE;
 
-    if (clGetPlatformIDs(1, &platform, &num_platforms) != CL_SUCCESS) return FALSE;
-    cl_device_id device;
+    for (cl_uint i = 0; i < num_platforms; i++) {
+        char name[1024];
+        clGetPlatformInfo(platforms[i], CL_PLATFORM_NAME, sizeof(name), name, NULL);
+        if (strstr(name, "Intel")) { platform = platforms[i]; break; }
+    }
+    if (!platform) return FALSE;
+
     if (clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL) != CL_SUCCESS) return FALSE;
 
     self->context = clCreateContext(NULL, 1, &device, NULL, NULL, &err);
@@ -61,138 +63,102 @@ static gboolean init_opencl(GstThzVaapiBlur *self) {
 
     /* Load Kernel */
     FILE *f = fopen(KERNEL_PATH, "r");
-    if (!f) {
-        g_print("THZ-DEBUG: Could not open kernel file at %s\n", KERNEL_PATH);
-        return FALSE;
-    }
+    if (!f) return FALSE;
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     rewind(f);
     char *src = (char *)malloc(sz + 1);
-    size_t rbytes = fread(src, 1, sz, f);
-    src[rbytes] = '\0';
+    fread(src, 1, sz, f);
+    src[sz] = '\0';
     fclose(f);
 
     self->program = clCreateProgramWithSource(self->context, 1, (const char**)&src, NULL, &err);
-    err = clBuildProgram(self->program, 1, &device, NULL, NULL, NULL);
-    if (err != CL_SUCCESS) {
-        char buffer[2048];
-        clGetProgramBuildInfo(self->program, device, CL_PROGRAM_BUILD_LOG, sizeof(buffer), buffer, NULL);
-        g_print("THZ-DEBUG: CL Build Error: %s\n", buffer);
-        free(src);
-        return FALSE;
-    }
+    clBuildProgram(self->program, 1, &device, NULL, NULL, NULL);
     self->kernel = clCreateKernel(self->program, "blur_image", &err);
     free(src);
 
-    /* Get Intel Extensions */
-    self->clCreateFromVA_APIMediaSurfaceINTEL = (clCreateFromVA_APIMediaSurfaceINTEL_fn)
-        clGetExtensionFunctionAddressForPlatform(platform, "clCreateFromVA_APIMediaSurfaceINTEL");
-    self->clEnqueueAcquireVA_APIMediaSurfacesINTEL = (clEnqueueAcquireVA_APIMediaSurfacesINTEL_fn)
-        clGetExtensionFunctionAddressForPlatform(platform, "clEnqueueAcquireVA_APIMediaSurfacesINTEL");
-    self->clEnqueueReleaseVA_APIMediaSurfacesINTEL = (clEnqueueReleaseVA_APIMediaSurfacesINTEL_fn)
-        clGetExtensionFunctionAddressForPlatform(platform, "clEnqueueReleaseVA_APIMediaSurfacesINTEL");
-
-    if (!self->clCreateFromVA_APIMediaSurfaceINTEL) {
-        g_print("THZ-DEBUG: Intel VA-API Media Sharing extensions NOT found!\n");
-        return FALSE;
-    }
-
     self->initialized = TRUE;
-    g_print("THZ-DEBUG: OpenCL successfully initialized.\n");
+    g_print("THZ-DEBUG: OpenCL DMA-BUF Initialized (RGBA).\n");
     return TRUE;
-}
-
-static void gst_thz_vaapi_blur_set_context(GstElement *element, GstContext *context) {
-    GstThzVaapiBlur *self = GST_THZ_VAAPI_BLUR(element);
-    /* Attempt to share the VA display context between elements */
-    gst_va_handle_set_context(element, context, "gst.va.display", &self->va_display);
-    GST_ELEMENT_CLASS(gst_thz_vaapi_blur_parent_class)->set_context(element, context);
 }
 
 static GstFlowReturn gst_thz_vaapi_blur_transform_ip(GstBaseTransform *trans, GstBuffer *buf) {
     GstThzVaapiBlur *self = GST_THZ_VAAPI_BLUR(trans);
+    cl_int err;
+
     if (!self->initialized && !init_opencl(self)) return GST_FLOW_ERROR;
 
-    VASurfaceID surface = VA_INVALID_ID;
-
-    /* 1. Extract Surface using Modern GstVA API */
-    surface = gst_va_buffer_get_surface(buf);
-
-    if (surface != VA_INVALID_ID) {
-        g_print("THZ-DEBUG: Success! Surface %u obtained via gst_va_buffer_get_surface\n", surface);
-    } else {
-        g_print("THZ-DEBUG: gst_va_buffer_get_surface failed. Attempting fallback...\n");
-
-        /* Fallback: Peek memory allocator */
-        GstMemory *mem = gst_buffer_peek_memory(buf, 0);
-        if (mem) {
-            const gchar *allocator_name = (mem->allocator && mem->allocator->mem_type) ? 
-                                          mem->allocator->mem_type : "unknown";
-            g_print("THZ-DEBUG: Memory detected. Allocator type: %s\n", allocator_name);
-
-            {
-                surface = gst_va_memory_get_surface(mem);
-                if (surface != VA_INVALID_ID) {
-                    g_print("THZ-DEBUG: Success! Surface %u obtained via fallback (va_memory_get_surface)\n", surface);
-                } else {
-                    g_print("THZ-DEBUG: Fallback failed. Memory is VA, but Surface ID is invalid.\n");
-                }
-            }
-            g_print("THZ-DEBUG: Fallback failed. No memory found in buffer.\n");
-        }
-    }
-    if (surface == VA_INVALID_ID) {
-        g_print("THZ-DEBUG: ERROR - Failed to extract VASurfaceID from buffer.\n");
-        return GST_FLOW_OK;
+    GstMemory *mem = gst_buffer_peek_memory(buf, 0);
+    if (!gst_is_dmabuf_memory(mem)) {
+        // If not already DMA-BUF, try to get the FD from VA surface
+        // Iris Xe standardizes on DMA-BUF for VAMemory
     }
 
-    /* 2. Map VA-API Surface to OpenCL Image */
-    cl_int err;
-    cl_mem cl_image = self->clCreateFromVA_APIMediaSurfaceINTEL(
-        self->context, 
-        CL_MEM_READ_WRITE, 
-        &surface, 
-        0, // Plane index (0 for BGRA)
-        &err
-    );
-    
+    int fd = gst_dmabuf_memory_get_fd(mem);
+    if (fd < 0) return GST_FLOW_OK;
+
+    /* Create OpenCL Image from DMA-BUF FD */
+    cl_image_format format = { CL_RGBA, CL_UNORM_INT8 };
+    cl_image_desc desc = {0};
+    desc.image_type = CL_MEM_OBJECT_IMAGE2D;
+    desc.image_width = self->width;
+    desc.image_height = self->height;
+
+    /* DMA-BUF Properties */
+    cl_mem_properties props[] = {
+        CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR, (cl_mem_properties)fd,
+        0
+    };
+
+    /* Note: clCreateImageWithProperties is the modern way to import FDs */
+    cl_mem cl_image = clCreateImageWithProperties(self->context, props, 
+                                                 CL_MEM_READ_WRITE, &format, &desc, NULL, &err);
+
     if (err == CL_SUCCESS && cl_image) {
-        /* Lock surface for GPU compute */
-        self->clEnqueueAcquireVA_APIMediaSurfacesINTEL(self->queue, 1, &cl_image, 0, NULL, NULL);
-        
         clSetKernelArg(self->kernel, 0, sizeof(cl_mem), &cl_image);
         clSetKernelArg(self->kernel, 1, sizeof(cl_mem), &cl_image);
         clSetKernelArg(self->kernel, 2, sizeof(int), &self->blur_strength);
         
         size_t global[2] = { (size_t)self->width, (size_t)self->height };
-        cl_int k_err = clEnqueueNDRangeKernel(self->queue, self->kernel, 2, NULL, global, NULL, 0, NULL, NULL);
+        clEnqueueNDRangeKernel(self->queue, self->kernel, 2, NULL, global, NULL, 0, NULL, NULL);
         
-        if (k_err != CL_SUCCESS) {
-            g_print("THZ-DEBUG: Kernel Execution Error: %d\n", k_err);
-        }
-
-        /* Unlock and release */
-        self->clEnqueueReleaseVA_APIMediaSurfacesINTEL(self->queue, 1, &cl_image, 0, NULL, NULL);
         clFinish(self->queue);
         clReleaseMemObject(cl_image);
     } else {
-        g_print("THZ-DEBUG: OpenCL Mapping FAILED with error: %d for surface %u\n", err, surface);
+        static gboolean warned = FALSE;
+        if (!warned) {
+            g_print("THZ-DEBUG: DMA-BUF Import failed. Error: %d\n", err);
+            warned = TRUE;
+        }
     }
-
     return GST_FLOW_OK;
+}
+
+static void gst_thz_vaapi_blur_set_context(GstElement *element, GstContext *context) {
+    GstThzVaapiBlur *self = GST_THZ_VAAPI_BLUR(element);
+    gst_va_handle_set_context(element, context, "gst.va.display", &self->va_display);
+    GST_ELEMENT_CLASS(gst_thz_vaapi_blur_parent_class)->set_context(element, context);
 }
 
 static gboolean gst_thz_vaapi_blur_set_caps(GstBaseTransform *trans, GstCaps *incaps, GstCaps *outcaps) {
     GstThzVaapiBlur *self = GST_THZ_VAAPI_BLUR(trans);
     GstVideoInfo info;
     if (gst_video_info_from_caps(&info, incaps)) {
-        self->width = info.width;
-        self->height = info.height;
-        g_print("THZ-DEBUG: Caps set. Res: %dx%d\n", self->width, self->height);
+        self->width = GST_VIDEO_INFO_WIDTH(&info);
+        self->height = GST_VIDEO_INFO_HEIGHT(&info);
         return TRUE;
     }
     return FALSE;
+}
+
+static void gst_thz_vaapi_blur_finalize(GObject *object) {
+    GstThzVaapiBlur *self = GST_THZ_VAAPI_BLUR(object);
+    if (self->va_display) gst_object_unref(self->va_display);
+    if (self->kernel) clReleaseKernel(self->kernel);
+    if (self->program) clReleaseProgram(self->program);
+    if (self->queue) clReleaseCommandQueue(self->queue);
+    if (self->context) clReleaseContext(self->context);
+    G_OBJECT_CLASS(gst_thz_vaapi_blur_parent_class)->finalize(object);
 }
 
 static void gst_thz_vaapi_blur_set_property(GObject *object, guint prop_id, const GValue *value, GParamSpec *pspec) {
@@ -212,6 +178,7 @@ static void gst_thz_vaapi_blur_class_init(GstThzVaapiBlurClass *klass) {
 
     g_class->set_property = gst_thz_vaapi_blur_set_property;
     g_class->get_property = gst_thz_vaapi_blur_get_property;
+    g_class->finalize = gst_thz_vaapi_blur_finalize;
     e_class->set_context = GST_DEBUG_FUNCPTR(gst_thz_vaapi_blur_set_context);
     b_class->transform_ip = GST_DEBUG_FUNCPTR(gst_thz_vaapi_blur_transform_ip);
     b_class->set_caps = GST_DEBUG_FUNCPTR(gst_thz_vaapi_blur_set_caps);
@@ -219,18 +186,25 @@ static void gst_thz_vaapi_blur_class_init(GstThzVaapiBlurClass *klass) {
     g_object_class_install_property(g_class, PROP_BLUR_STRENGTH, 
         g_param_spec_int("blur-strength", "Strength", "0-100", 0, 100, 50, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
-    gst_element_class_set_static_metadata(e_class, "THZ VAAPI BGRA Blur", "Filter", "Intel GPU BGRA Zero-Copy", "Gemini");
+    gst_element_class_set_static_metadata(e_class, "THZ VAAPI RGBA Blur", "Filter", "DMA-BUF Zero-Copy", "Gemini");
 
-    /* Ensure we negotiate for VASurface memory */
     GstStaticPadTemplate sink_t = GST_STATIC_PAD_TEMPLATE("sink", GST_PAD_SINK, GST_PAD_ALWAYS, 
-        GST_STATIC_CAPS("video/x-raw(memory:VASurface), format=BGRA"));
+        GST_STATIC_CAPS("video/x-raw(memory:DMABuf), format=RGBA"));
     GstStaticPadTemplate src_t = GST_STATIC_PAD_TEMPLATE("src", GST_PAD_SRC, GST_PAD_ALWAYS, 
-        GST_STATIC_CAPS("video/x-raw(memory:VASurface), format=BGRA"));
+        GST_STATIC_CAPS("video/x-raw(memory:DMABuf), format=RGBA"));
     
     gst_element_class_add_pad_template(e_class, gst_static_pad_template_get(&sink_t));
     gst_element_class_add_pad_template(e_class, gst_static_pad_template_get(&src_t));
 }
 
-static void gst_thz_vaapi_blur_init(GstThzVaapiBlur *self) { self->blur_strength = 50; self->initialized = FALSE; }
-static gboolean plugin_init(GstPlugin *plugin) { return gst_element_register(plugin, "thzvaapiblur", GST_RANK_NONE, GST_TYPE_THZ_VAAPI_BLUR); }
-GST_PLUGIN_DEFINE(GST_VERSION_MAJOR, GST_VERSION_MINOR, thzvaapiblur, "VAAPI BGRA Zero-Copy", plugin_init, VERSION, "LGPL", "GStreamer", "https://gstreamer.net/")
+static void gst_thz_vaapi_blur_init(GstThzVaapiBlur *self) { 
+    self->blur_strength = 50; 
+    self->initialized = FALSE; 
+    self->va_display = NULL;
+}
+
+static gboolean plugin_init(GstPlugin *plugin) { 
+    return gst_element_register(plugin, "thzvaapiblur", GST_RANK_NONE, GST_TYPE_THZ_VAAPI_BLUR); 
+}
+
+GST_PLUGIN_DEFINE(GST_VERSION_MAJOR, GST_VERSION_MINOR, thzvaapiblur, "VAAPI RGBA Zero-Copy", plugin_init, VERSION, "LGPL", "GStreamer", "https://gstreamer.net/")
