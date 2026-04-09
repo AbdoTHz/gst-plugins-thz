@@ -1,6 +1,6 @@
 #define GST_USE_UNSTABLE_API 1
 #ifndef PACKAGE
-#define PACKAGE "thzvaapiblur"
+#define PACKAGE "thzoclblur"
 #endif
 #define VERSION "1.0.0"
 
@@ -20,10 +20,10 @@
 
 #define KERNEL_PATH "../blur.cl"
 
-#define GST_TYPE_THZ_VAAPI_BLUR (gst_thz_vaapi_blur_get_type())
-G_DECLARE_FINAL_TYPE(GstThzVaapiBlur, gst_thz_vaapi_blur, GST, THZ_VAAPI_BLUR, GstBaseTransform)
+#define GST_TYPE_THZ_OCL_BLUR (gst_thz_ocl_blur_get_type())
+G_DECLARE_FINAL_TYPE(GstThzOclBlur, gst_thz_ocl_blur, GST, THZ_OCL_BLUR, GstBaseTransform)
 
-struct _GstThzVaapiBlur {
+struct _GstThzOclBlur {
     GstBaseTransform parent;
     gint blur_strength;
     gint width, height;
@@ -38,9 +38,9 @@ struct _GstThzVaapiBlur {
 };
 
 enum { PROP_0, PROP_BLUR_STRENGTH };
-G_DEFINE_TYPE(GstThzVaapiBlur, gst_thz_vaapi_blur, GST_TYPE_BASE_TRANSFORM);
+G_DEFINE_TYPE(GstThzOclBlur, gst_thz_ocl_blur, GST_TYPE_BASE_TRANSFORM);
 
-static gboolean init_opencl(GstThzVaapiBlur *self) {
+static gboolean init_opencl(GstThzOclBlur *self) {
     cl_uint num_platforms;
     cl_platform_id platform = NULL;
     cl_device_id device = NULL;
@@ -82,8 +82,8 @@ static gboolean init_opencl(GstThzVaapiBlur *self) {
     return TRUE;
 }
 
-static GstFlowReturn gst_thz_vaapi_blur_transform_ip(GstBaseTransform *trans, GstBuffer *buf) {
-    GstThzVaapiBlur *self = GST_THZ_VAAPI_BLUR(trans);
+static GstFlowReturn gst_thz_ocl_blur_transform_ip(GstBaseTransform *trans, GstBuffer *buf) {
+    GstThzOclBlur *self = GST_THZ_OCL_BLUR(trans);
     cl_int err;
 
     if (!self->initialized && !init_opencl(self)) return GST_FLOW_ERROR;
@@ -123,7 +123,7 @@ static GstFlowReturn gst_thz_vaapi_blur_transform_ip(GstBaseTransform *trans, Gs
         clEnqueueNDRangeKernel(self->queue, self->kernel, 2, NULL, global, NULL, 0, NULL, NULL);
         
         clFinish(self->queue);
-        clReleaseMemObject(cl_image);
+        //clReleaseMemObject(cl_image);
     } else {
         static gboolean warned = FALSE;
         if (!warned) {
@@ -134,14 +134,14 @@ static GstFlowReturn gst_thz_vaapi_blur_transform_ip(GstBaseTransform *trans, Gs
     return GST_FLOW_OK;
 }
 
-static void gst_thz_vaapi_blur_set_context(GstElement *element, GstContext *context) {
-    GstThzVaapiBlur *self = GST_THZ_VAAPI_BLUR(element);
+static void gst_thz_ocl_blur_set_context(GstElement *element, GstContext *context) {
+    GstThzOclBlur *self = GST_THZ_OCL_BLUR(element);
     gst_va_handle_set_context(element, context, "gst.va.display", &self->va_display);
-    GST_ELEMENT_CLASS(gst_thz_vaapi_blur_parent_class)->set_context(element, context);
+    GST_ELEMENT_CLASS(gst_thz_ocl_blur_parent_class)->set_context(element, context);
 }
 
-static gboolean gst_thz_vaapi_blur_set_caps(GstBaseTransform *trans, GstCaps *incaps, GstCaps *outcaps) {
-    GstThzVaapiBlur *self = GST_THZ_VAAPI_BLUR(trans);
+static gboolean gst_thz_ocl_blur_set_caps(GstBaseTransform *trans, GstCaps *incaps, GstCaps *outcaps) {
+    GstThzOclBlur *self = GST_THZ_OCL_BLUR(trans);
     GstVideoInfo info;
     if (gst_video_info_from_caps(&info, incaps)) {
         self->width = GST_VIDEO_INFO_WIDTH(&info);
@@ -151,42 +151,42 @@ static gboolean gst_thz_vaapi_blur_set_caps(GstBaseTransform *trans, GstCaps *in
     return FALSE;
 }
 
-static void gst_thz_vaapi_blur_finalize(GObject *object) {
-    GstThzVaapiBlur *self = GST_THZ_VAAPI_BLUR(object);
+static void gst_thz_ocl_blur_finalize(GObject *object) {
+    GstThzOclBlur *self = GST_THZ_OCL_BLUR(object);
     if (self->va_display) gst_object_unref(self->va_display);
     if (self->kernel) clReleaseKernel(self->kernel);
     if (self->program) clReleaseProgram(self->program);
     if (self->queue) clReleaseCommandQueue(self->queue);
     if (self->context) clReleaseContext(self->context);
-    G_OBJECT_CLASS(gst_thz_vaapi_blur_parent_class)->finalize(object);
+    G_OBJECT_CLASS(gst_thz_ocl_blur_parent_class)->finalize(object);
 }
 
-static void gst_thz_vaapi_blur_set_property(GObject *object, guint prop_id, const GValue *value, GParamSpec *pspec) {
-    GstThzVaapiBlur *self = GST_THZ_VAAPI_BLUR(object);
+static void gst_thz_ocl_blur_set_property(GObject *object, guint prop_id, const GValue *value, GParamSpec *pspec) {
+    GstThzOclBlur *self = GST_THZ_OCL_BLUR(object);
     if (prop_id == PROP_BLUR_STRENGTH) self->blur_strength = g_value_get_int(value);
 }
 
-static void gst_thz_vaapi_blur_get_property(GObject *object, guint prop_id, GValue *value, GParamSpec *pspec) {
-    GstThzVaapiBlur *self = GST_THZ_VAAPI_BLUR(object);
+static void gst_thz_ocl_blur_get_property(GObject *object, guint prop_id, GValue *value, GParamSpec *pspec) {
+    GstThzOclBlur *self = GST_THZ_OCL_BLUR(object);
     if (prop_id == PROP_BLUR_STRENGTH) g_value_set_int(value, self->blur_strength);
 }
 
-static void gst_thz_vaapi_blur_class_init(GstThzVaapiBlurClass *klass) {
+static void gst_thz_ocl_blur_class_init(GstThzOclBlurClass *klass) {
     GObjectClass *g_class = G_OBJECT_CLASS(klass);
     GstElementClass *e_class = GST_ELEMENT_CLASS(klass);
     GstBaseTransformClass *b_class = GST_BASE_TRANSFORM_CLASS(klass);
 
-    g_class->set_property = gst_thz_vaapi_blur_set_property;
-    g_class->get_property = gst_thz_vaapi_blur_get_property;
-    g_class->finalize = gst_thz_vaapi_blur_finalize;
-    e_class->set_context = GST_DEBUG_FUNCPTR(gst_thz_vaapi_blur_set_context);
-    b_class->transform_ip = GST_DEBUG_FUNCPTR(gst_thz_vaapi_blur_transform_ip);
-    b_class->set_caps = GST_DEBUG_FUNCPTR(gst_thz_vaapi_blur_set_caps);
+    g_class->set_property = gst_thz_ocl_blur_set_property;
+    g_class->get_property = gst_thz_ocl_blur_get_property;
+    g_class->finalize = gst_thz_ocl_blur_finalize;
+    e_class->set_context = GST_DEBUG_FUNCPTR(gst_thz_ocl_blur_set_context);
+    b_class->transform_ip = GST_DEBUG_FUNCPTR(gst_thz_ocl_blur_transform_ip);
+    b_class->set_caps = GST_DEBUG_FUNCPTR(gst_thz_ocl_blur_set_caps);
 
     g_object_class_install_property(g_class, PROP_BLUR_STRENGTH, 
         g_param_spec_int("blur-strength", "Strength", "0-100", 0, 100, 50, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
-    gst_element_class_set_static_metadata(e_class, "THZ VAAPI RGBA Blur", "Filter", "DMA-BUF Zero-Copy", "Gemini");
+    gst_element_class_set_static_metadata(e_class, "THZ OCL RGBA Blur", "Filter", "DMA-BUF Zero-Copy", "Gemini");
 
     GstStaticPadTemplate sink_t = GST_STATIC_PAD_TEMPLATE("sink", GST_PAD_SINK, GST_PAD_ALWAYS, 
         GST_STATIC_CAPS("video/x-raw(memory:DMABuf), format=RGBA"));
@@ -197,14 +197,14 @@ static void gst_thz_vaapi_blur_class_init(GstThzVaapiBlurClass *klass) {
     gst_element_class_add_pad_template(e_class, gst_static_pad_template_get(&src_t));
 }
 
-static void gst_thz_vaapi_blur_init(GstThzVaapiBlur *self) { 
+static void gst_thz_ocl_blur_init(GstThzOclBlur *self) { 
     self->blur_strength = 50; 
     self->initialized = FALSE; 
     self->va_display = NULL;
 }
 
 static gboolean plugin_init(GstPlugin *plugin) { 
-    return gst_element_register(plugin, "thzvaapiblur", GST_RANK_NONE, GST_TYPE_THZ_VAAPI_BLUR); 
+    return gst_element_register(plugin, "thzoclblur", GST_RANK_NONE, GST_TYPE_THZ_OCL_BLUR); 
 }
 
-GST_PLUGIN_DEFINE(GST_VERSION_MAJOR, GST_VERSION_MINOR, thzvaapiblur, "VAAPI RGBA Zero-Copy", plugin_init, VERSION, "LGPL", "GStreamer", "https://gstreamer.net/")
+GST_PLUGIN_DEFINE(GST_VERSION_MAJOR, GST_VERSION_MINOR, thzoclblur, "OCL RGBA Zero-Copy", plugin_init, VERSION, "LGPL", "GStreamer", "https://gstreamer.net/")
