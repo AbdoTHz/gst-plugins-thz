@@ -161,8 +161,8 @@ static GstFlowReturn gst_thz_ocl_blur_transform(GstBaseTransform *trans, GstBuff
     clFinish(self->queue);
 
 cleanup:
-    if (cl_in_image) clReleaseMemObject(cl_in_image);
-    if (cl_out_image) clReleaseMemObject(cl_out_image);
+    //if (cl_in_image) clReleaseMemObject(cl_in_image);
+    //if (cl_out_image) clReleaseMemObject(cl_out_image);
 
     if (err != CL_SUCCESS) return GST_FLOW_ERROR;
 
