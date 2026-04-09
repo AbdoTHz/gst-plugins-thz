@@ -63,11 +63,15 @@ static gboolean init_opencl(GstThzOclBlur *self) {
 
     /* Load Kernel */
     FILE *f = fopen(KERNEL_PATH, "r");
-    if (!f) return FALSE;
+    if (!f) {
+        g_print("THZ-DEBUG: Failed to open kernel file at %s\n", KERNEL_PATH);
+        return FALSE;
+    }
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     rewind(f);
     char *src = (char *)malloc(sz + 1);
+    if (!src) { fclose(f); return FALSE; }
     fread(src, 1, sz, f);
     src[sz] = '\0';
     fclose(f);
@@ -78,59 +82,90 @@ static gboolean init_opencl(GstThzOclBlur *self) {
     free(src);
 
     self->initialized = TRUE;
-    g_print("THZ-DEBUG: OpenCL DMA-BUF Initialized (RGBA).\n");
+    g_print("THZ-DEBUG: OpenCL Out-of-Place Initialized (RGBA). Device: Intel GPU\n");
     return TRUE;
 }
 
-static GstFlowReturn gst_thz_ocl_blur_transform_ip(GstBaseTransform *trans, GstBuffer *buf) {
+static GstFlowReturn gst_thz_ocl_blur_transform(GstBaseTransform *trans, GstBuffer *inbuf, GstBuffer *outbuf) {
     GstThzOclBlur *self = GST_THZ_OCL_BLUR(trans);
     cl_int err;
+    cl_mem cl_in_image = NULL;
+    cl_mem cl_out_image = NULL;
 
     if (!self->initialized && !init_opencl(self)) return GST_FLOW_ERROR;
 
-    GstMemory *mem = gst_buffer_peek_memory(buf, 0);
-    if (!gst_is_dmabuf_memory(mem)) {
-        // If not already DMA-BUF, try to get the FD from VA surface
-        // Iris Xe standardizes on DMA-BUF for VAMemory
+    /* Get DMA-BUF FDs for both buffers */
+    GstMemory *in_mem = gst_buffer_peek_memory(inbuf, 0);
+    GstMemory *out_mem = gst_buffer_peek_memory(outbuf, 0);
+
+    if (!gst_is_dmabuf_memory(in_mem) || !gst_is_dmabuf_memory(out_mem)) {
+        static gboolean warned_mem = FALSE;
+        if (!warned_mem) {
+            g_print("THZ-DEBUG: Input or Output memory is NOT DMA-BUF!\n");
+            warned_mem = TRUE;
+        }
+        return GST_FLOW_ERROR;
     }
 
-    int fd = gst_dmabuf_memory_get_fd(mem);
-    if (fd < 0) return GST_FLOW_OK;
+    int in_fd = gst_dmabuf_memory_get_fd(in_mem);
+    int out_fd = gst_dmabuf_memory_get_fd(out_mem);
 
-    /* Create OpenCL Image from DMA-BUF FD */
+    if (in_fd < 0 || out_fd < 0) {
+        g_print("THZ-DEBUG: Invalid FD (In: %d, Out: %d)\n", in_fd, out_fd);
+        return GST_FLOW_ERROR;
+    }
+
+    /* Setup Image Formats and Descriptors */
     cl_image_format format = { CL_RGBA, CL_UNORM_INT8 };
     cl_image_desc desc = {0};
     desc.image_type = CL_MEM_OBJECT_IMAGE2D;
     desc.image_width = self->width;
     desc.image_height = self->height;
 
-    /* DMA-BUF Properties */
-    cl_mem_properties props[] = {
-        CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR, (cl_mem_properties)fd,
+    /* Import Input Image */
+    cl_mem_properties in_props[] = {
+        CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR, (cl_mem_properties)in_fd,
         0
     };
-
-    /* Note: clCreateImageWithProperties is the modern way to import FDs */
-    cl_mem cl_image = clCreateImageWithProperties(self->context, props, 
-                                                 CL_MEM_READ_WRITE, &format, &desc, NULL, &err);
-
-    if (err == CL_SUCCESS && cl_image) {
-        clSetKernelArg(self->kernel, 0, sizeof(cl_mem), &cl_image);
-        clSetKernelArg(self->kernel, 1, sizeof(cl_mem), &cl_image);
-        clSetKernelArg(self->kernel, 2, sizeof(int), &self->blur_strength);
-        
-        size_t global[2] = { (size_t)self->width, (size_t)self->height };
-        clEnqueueNDRangeKernel(self->queue, self->kernel, 2, NULL, global, NULL, 0, NULL, NULL);
-        
-        clFinish(self->queue);
-        //clReleaseMemObject(cl_image);
-    } else {
-        static gboolean warned = FALSE;
-        if (!warned) {
-            g_print("THZ-DEBUG: DMA-BUF Import failed. Error: %d\n", err);
-            warned = TRUE;
-        }
+    cl_in_image = clCreateImageWithProperties(self->context, in_props, 
+                                             CL_MEM_READ_ONLY, &format, &desc, NULL, &err);
+    if (err != CL_SUCCESS) {
+        g_print("THZ-DEBUG: clCreateImageWithProperties (Input) failed: %d\n", err);
+        goto cleanup;
     }
+
+    /* Import Output Image */
+    cl_mem_properties out_props[] = {
+        CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR, (cl_mem_properties)out_fd,
+        0
+    };
+    cl_out_image = clCreateImageWithProperties(self->context, out_props, 
+                                              CL_MEM_WRITE_ONLY, &format, &desc, NULL, &err);
+    if (err != CL_SUCCESS) {
+        g_print("THZ-DEBUG: clCreateImageWithProperties (Output) failed: %d\n", err);
+        goto cleanup;
+    }
+
+    /* Execute Kernel */
+    clSetKernelArg(self->kernel, 0, sizeof(cl_mem), &cl_in_image);
+    clSetKernelArg(self->kernel, 1, sizeof(cl_mem), &cl_out_image);
+    clSetKernelArg(self->kernel, 2, sizeof(int), &self->blur_strength);
+    
+    size_t global[2] = { (size_t)self->width, (size_t)self->height };
+    err = clEnqueueNDRangeKernel(self->queue, self->kernel, 2, NULL, global, NULL, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        g_print("THZ-DEBUG: clEnqueueNDRangeKernel failed: %d\n", err);
+    }
+    
+    /* Ensure GPU work is done before releasing FDs back to GStreamer */
+    clFinish(self->queue);
+
+cleanup:
+    if (cl_in_image) clReleaseMemObject(cl_in_image);
+    if (cl_out_image) clReleaseMemObject(cl_out_image);
+
+    if (err != CL_SUCCESS) return GST_FLOW_ERROR;
+
     return GST_FLOW_OK;
 }
 
@@ -146,6 +181,7 @@ static gboolean gst_thz_ocl_blur_set_caps(GstBaseTransform *trans, GstCaps *inca
     if (gst_video_info_from_caps(&info, incaps)) {
         self->width = GST_VIDEO_INFO_WIDTH(&info);
         self->height = GST_VIDEO_INFO_HEIGHT(&info);
+        g_print("THZ-DEBUG: Caps set. Resolution: %dx%d\n", self->width, self->height);
         return TRUE;
     }
     return FALSE;
@@ -153,6 +189,7 @@ static gboolean gst_thz_ocl_blur_set_caps(GstBaseTransform *trans, GstCaps *inca
 
 static void gst_thz_ocl_blur_finalize(GObject *object) {
     GstThzOclBlur *self = GST_THZ_OCL_BLUR(object);
+    g_print("THZ-DEBUG: Finalizing plugin and releasing OCL resources.\n");
     if (self->va_display) gst_object_unref(self->va_display);
     if (self->kernel) clReleaseKernel(self->kernel);
     if (self->program) clReleaseProgram(self->program);
@@ -180,13 +217,14 @@ static void gst_thz_ocl_blur_class_init(GstThzOclBlurClass *klass) {
     g_class->get_property = gst_thz_ocl_blur_get_property;
     g_class->finalize = gst_thz_ocl_blur_finalize;
     e_class->set_context = GST_DEBUG_FUNCPTR(gst_thz_ocl_blur_set_context);
-    b_class->transform_ip = GST_DEBUG_FUNCPTR(gst_thz_ocl_blur_transform_ip);
+    
+    b_class->transform = GST_DEBUG_FUNCPTR(gst_thz_ocl_blur_transform);
     b_class->set_caps = GST_DEBUG_FUNCPTR(gst_thz_ocl_blur_set_caps);
 
     g_object_class_install_property(g_class, PROP_BLUR_STRENGTH, 
         g_param_spec_int("blur-strength", "Strength", "0-100", 0, 100, 50, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
-    gst_element_class_set_static_metadata(e_class, "THZ OCL RGBA Blur", "Filter", "DMA-BUF Zero-Copy", "Gemini");
+    gst_element_class_set_static_metadata(e_class, "THZ OCL RGBA Blur", "Filter", "DMA-BUF Zero-Copy Transform", "Gemini");
 
     GstStaticPadTemplate sink_t = GST_STATIC_PAD_TEMPLATE("sink", GST_PAD_SINK, GST_PAD_ALWAYS, 
         GST_STATIC_CAPS("video/x-raw(memory:DMABuf), format=RGBA"));
