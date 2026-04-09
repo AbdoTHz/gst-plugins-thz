@@ -18,7 +18,7 @@
 #include <CL/cl.h>
 #include <CL/cl_ext.h>
 
-#define KERNEL_PATH "../blur.cl"
+#define KERNEL_PATH "/home/workspace/gst-plugins-thz/gst-thz-blur/blur.cl"
 
 #define GST_TYPE_THZ_OCL_BLUR (gst_thz_ocl_blur_get_type())
 G_DECLARE_FINAL_TYPE(GstThzOclBlur, gst_thz_ocl_blur, GST, THZ_OCL_BLUR, GstBaseTransform)
