@@ -95,14 +95,6 @@ static GstFlowReturn gst_thz_ocl_blur_transform(GstBaseTransform *trans, GstBuff
 
     if (!self->initialized && !init_opencl(self)) return GST_FLOW_ERROR;
 
-    /* Get GStreamer Stride (Assuming Input/Output share same caps) */
-    GstVideoInfo info;
-    GstCaps *caps = gst_pad_get_current_caps(GST_BASE_TRANSFORM_SINK_PAD(trans));
-    if (gst_video_info_from_caps(&info, caps)) {
-        g_print("THZ-DEBUG: Gst Stride (In/Out): %d\n", GST_VIDEO_INFO_PLANE_STRIDE(&info, 0));
-    }
-    if (caps) gst_caps_unref(caps);
-
     /* Get DMA-BUF FDs for both buffers */
     GstMemory *in_mem = gst_buffer_peek_memory(inbuf, 0);
     GstMemory *out_mem = gst_buffer_peek_memory(outbuf, 0);
@@ -144,13 +136,6 @@ static GstFlowReturn gst_thz_ocl_blur_transform(GstBaseTransform *trans, GstBuff
                                                 CL_MEM_WRITE_ONLY, buffer_size, NULL, &err);
 
     if (err == CL_SUCCESS) {
-        /* Print OpenCL Image Strides */
-        size_t in_ocl_stride = 0;
-        size_t out_ocl_stride = 0;
-        clGetImageInfo(cl_in_image, CL_IMAGE_ROW_PITCH, sizeof(size_t), &in_ocl_stride, NULL);
-        //clGetImageInfo(cl_out_image, CL_IMAGE_ROW_PITCH, sizeof(size_t), &out_ocl_stride, NULL);
-        g_print("THZ-DEBUG: OCL Strides - In: %zu, Out: %zu\n", in_ocl_stride, in_ocl_stride);
-
         /* Execute Kernel */
         clSetKernelArg(self->kernel, 0, sizeof(cl_mem), &cl_in_buffer);
         clSetKernelArg(self->kernel, 1, sizeof(cl_mem), &cl_out_buffer);
@@ -164,8 +149,8 @@ static GstFlowReturn gst_thz_ocl_blur_transform(GstBaseTransform *trans, GstBuff
 
 cleanup:
     /* Release memory handles (Commented out per request) */
-    // if (cl_in_image) clReleaseMemObject(cl_in_image);
-    // if (cl_out_image) clReleaseMemObject(cl_out_image);
+    // if (cl_in_buffer) clReleaseMemObject(cl_in_buffer);
+    // if (cl_out_buffer) clReleaseMemObject(cl_out_buffer);
 
     return (err == CL_SUCCESS) ? GST_FLOW_OK : GST_FLOW_ERROR;
 }
