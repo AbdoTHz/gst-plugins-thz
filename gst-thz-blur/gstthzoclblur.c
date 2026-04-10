@@ -90,7 +90,8 @@ static GstFlowReturn gst_thz_ocl_blur_transform(GstBaseTransform *trans, GstBuff
     GstThzOclBlur *self = GST_THZ_OCL_BLUR(trans);
     cl_int err;
     cl_mem cl_in_image = NULL;
-    cl_mem cl_out_image = NULL;
+    cl_mem cl_in_buffer = NULL;
+    cl_mem cl_out_buffer = NULL;
 
     if (!self->initialized && !init_opencl(self)) return GST_FLOW_ERROR;
 
@@ -125,28 +126,34 @@ static GstFlowReturn gst_thz_ocl_blur_transform(GstBaseTransform *trans, GstBuff
         CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR, (cl_mem_properties)in_fd,
         0
     };
+
+    size_t buffer_size = self->width * self->height * 4; 
+
     cl_in_image = clCreateImageWithProperties(self->context, in_props, 
                                              CL_MEM_READ_ONLY, &format, &desc, NULL, &err);
-    
-    /* Import Output Image */
+
+    cl_in_buffer = clCreateBufferWithProperties(self->context, in_props, 
+                                                CL_MEM_WRITE_ONLY, buffer_size, NULL, &err);
+
     cl_mem_properties out_props[] = {
         CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR, (cl_mem_properties)out_fd,
         0
     };
-    cl_out_image = clCreateImageWithProperties(self->context, out_props, 
-                                              CL_MEM_WRITE_ONLY, &format, &desc, NULL, &err);
+    
+    cl_out_buffer = clCreateBufferWithProperties(self->context, out_props, 
+                                                CL_MEM_WRITE_ONLY, buffer_size, NULL, &err);
 
     if (err == CL_SUCCESS) {
         /* Print OpenCL Image Strides */
         size_t in_ocl_stride = 0;
         size_t out_ocl_stride = 0;
         clGetImageInfo(cl_in_image, CL_IMAGE_ROW_PITCH, sizeof(size_t), &in_ocl_stride, NULL);
-        clGetImageInfo(cl_out_image, CL_IMAGE_ROW_PITCH, sizeof(size_t), &out_ocl_stride, NULL);
-        g_print("THZ-DEBUG: OCL Strides - In: %zu, Out: %zu\n", in_ocl_stride, out_ocl_stride);
+        //clGetImageInfo(cl_out_image, CL_IMAGE_ROW_PITCH, sizeof(size_t), &out_ocl_stride, NULL);
+        g_print("THZ-DEBUG: OCL Strides - In: %zu, Out: %zu\n", in_ocl_stride, in_ocl_stride);
 
         /* Execute Kernel */
-        clSetKernelArg(self->kernel, 0, sizeof(cl_mem), &cl_in_image);
-        clSetKernelArg(self->kernel, 1, sizeof(cl_mem), &cl_out_image);
+        clSetKernelArg(self->kernel, 0, sizeof(cl_mem), &cl_in_buffer);
+        clSetKernelArg(self->kernel, 1, sizeof(cl_mem), &cl_out_buffer);
         clSetKernelArg(self->kernel, 2, sizeof(int), &self->blur_strength);
         
         size_t global[2] = { (size_t)self->width, (size_t)self->height };
