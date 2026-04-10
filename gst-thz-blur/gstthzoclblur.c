@@ -94,26 +94,24 @@ static GstFlowReturn gst_thz_ocl_blur_transform(GstBaseTransform *trans, GstBuff
 
     if (!self->initialized && !init_opencl(self)) return GST_FLOW_ERROR;
 
+    /* Get GStreamer Stride (Assuming Input/Output share same caps) */
+    GstVideoInfo info;
+    GstCaps *caps = gst_pad_get_current_caps(GST_BASE_TRANSFORM_SINK_PAD(trans));
+    if (gst_video_info_from_caps(&info, caps)) {
+        g_print("THZ-DEBUG: Gst Stride (In/Out): %d\n", GST_VIDEO_INFO_PLANE_STRIDE(&info, 0));
+    }
+    if (caps) gst_caps_unref(caps);
+
     /* Get DMA-BUF FDs for both buffers */
     GstMemory *in_mem = gst_buffer_peek_memory(inbuf, 0);
     GstMemory *out_mem = gst_buffer_peek_memory(outbuf, 0);
 
     if (!gst_is_dmabuf_memory(in_mem) || !gst_is_dmabuf_memory(out_mem)) {
-        static gboolean warned_mem = FALSE;
-        if (!warned_mem) {
-            g_print("THZ-DEBUG: Input or Output memory is NOT DMA-BUF!\n");
-            warned_mem = TRUE;
-        }
         return GST_FLOW_ERROR;
     }
 
     int in_fd = gst_dmabuf_memory_get_fd(in_mem);
     int out_fd = gst_dmabuf_memory_get_fd(out_mem);
-
-    if (in_fd < 0 || out_fd < 0) {
-        g_print("THZ-DEBUG: Invalid FD (In: %d, Out: %d)\n", in_fd, out_fd);
-        return GST_FLOW_ERROR;
-    }
 
     /* Setup Image Formats and Descriptors */
     cl_image_format format = { CL_RGBA, CL_UNORM_INT8 };
@@ -129,11 +127,7 @@ static GstFlowReturn gst_thz_ocl_blur_transform(GstBaseTransform *trans, GstBuff
     };
     cl_in_image = clCreateImageWithProperties(self->context, in_props, 
                                              CL_MEM_READ_ONLY, &format, &desc, NULL, &err);
-    if (err != CL_SUCCESS) {
-        g_print("THZ-DEBUG: clCreateImageWithProperties (Input) failed: %d\n", err);
-        goto cleanup;
-    }
-
+    
     /* Import Output Image */
     cl_mem_properties out_props[] = {
         CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR, (cl_mem_properties)out_fd,
@@ -141,32 +135,32 @@ static GstFlowReturn gst_thz_ocl_blur_transform(GstBaseTransform *trans, GstBuff
     };
     cl_out_image = clCreateImageWithProperties(self->context, out_props, 
                                               CL_MEM_WRITE_ONLY, &format, &desc, NULL, &err);
-    if (err != CL_SUCCESS) {
-        g_print("THZ-DEBUG: clCreateImageWithProperties (Output) failed: %d\n", err);
-        goto cleanup;
-    }
 
-    /* Execute Kernel */
-    clSetKernelArg(self->kernel, 0, sizeof(cl_mem), &cl_in_image);
-    clSetKernelArg(self->kernel, 1, sizeof(cl_mem), &cl_out_image);
-    clSetKernelArg(self->kernel, 2, sizeof(int), &self->blur_strength);
-    
-    size_t global[2] = { (size_t)self->width, (size_t)self->height };
-    err = clEnqueueNDRangeKernel(self->queue, self->kernel, 2, NULL, global, NULL, 0, NULL, NULL);
-    if (err != CL_SUCCESS) {
-        g_print("THZ-DEBUG: clEnqueueNDRangeKernel failed: %d\n", err);
+    if (err == CL_SUCCESS) {
+        /* Print OpenCL Image Strides */
+        size_t in_ocl_stride = 0;
+        size_t out_ocl_stride = 0;
+        clGetImageInfo(cl_in_image, CL_IMAGE_ROW_PITCH, sizeof(size_t), &in_ocl_stride, NULL);
+        clGetImageInfo(cl_out_image, CL_IMAGE_ROW_PITCH, sizeof(size_t), &out_ocl_stride, NULL);
+        g_print("THZ-DEBUG: OCL Strides - In: %zu, Out: %zu\n", in_ocl_stride, out_ocl_stride);
+
+        /* Execute Kernel */
+        clSetKernelArg(self->kernel, 0, sizeof(cl_mem), &cl_in_image);
+        clSetKernelArg(self->kernel, 1, sizeof(cl_mem), &cl_out_image);
+        clSetKernelArg(self->kernel, 2, sizeof(int), &self->blur_strength);
+        
+        size_t global[2] = { (size_t)self->width, (size_t)self->height };
+        clEnqueueNDRangeKernel(self->queue, self->kernel, 2, NULL, global, NULL, 0, NULL, NULL);
+        
+        clFinish(self->queue);
     }
-    
-    /* Ensure GPU work is done before releasing FDs back to GStreamer */
-    clFinish(self->queue);
 
 cleanup:
-    //if (cl_in_image) clReleaseMemObject(cl_in_image);
-    //if (cl_out_image) clReleaseMemObject(cl_out_image);
+    /* Release memory handles (Commented out per request) */
+    // if (cl_in_image) clReleaseMemObject(cl_in_image);
+    // if (cl_out_image) clReleaseMemObject(cl_out_image);
 
-    if (err != CL_SUCCESS) return GST_FLOW_ERROR;
-
-    return GST_FLOW_OK;
+    return (err == CL_SUCCESS) ? GST_FLOW_OK : GST_FLOW_ERROR;
 }
 
 static void gst_thz_ocl_blur_set_context(GstElement *element, GstContext *context) {
@@ -181,7 +175,6 @@ static gboolean gst_thz_ocl_blur_set_caps(GstBaseTransform *trans, GstCaps *inca
     if (gst_video_info_from_caps(&info, incaps)) {
         self->width = GST_VIDEO_INFO_WIDTH(&info);
         self->height = GST_VIDEO_INFO_HEIGHT(&info);
-        g_print("THZ-DEBUG: Caps set. Resolution: %dx%d\n", self->width, self->height);
         return TRUE;
     }
     return FALSE;
@@ -189,7 +182,6 @@ static gboolean gst_thz_ocl_blur_set_caps(GstBaseTransform *trans, GstCaps *inca
 
 static void gst_thz_ocl_blur_finalize(GObject *object) {
     GstThzOclBlur *self = GST_THZ_OCL_BLUR(object);
-    g_print("THZ-DEBUG: Finalizing plugin and releasing OCL resources.\n");
     if (self->va_display) gst_object_unref(self->va_display);
     if (self->kernel) clReleaseKernel(self->kernel);
     if (self->program) clReleaseProgram(self->program);
