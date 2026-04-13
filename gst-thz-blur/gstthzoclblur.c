@@ -210,10 +210,16 @@ static void gst_thz_ocl_blur_class_init(GstThzOclBlurClass *klass) {
 
     gst_element_class_set_static_metadata(e_class, "THZ OCL RGBA Blur", "Filter", "DMA-BUF Zero-Copy Transform", "Gemini");
 
+    const gchar *caps_str = "video/x-raw(memory:DMABuf), "
+                        "format = (string) DMA_DRM, "
+                        "drm-format = (string) AB24:0x0100000000000002, "
+                        "width = [ 16, 16384 ], "
+                        "height = [ 16, 16384 ]";
+
     GstStaticPadTemplate sink_t = GST_STATIC_PAD_TEMPLATE("sink", GST_PAD_SINK, GST_PAD_ALWAYS, 
-        GST_STATIC_CAPS("video/x-raw(memory:DMABuf), format=RGBA"));
+        GST_STATIC_CAPS(caps_str));
     GstStaticPadTemplate src_t = GST_STATIC_PAD_TEMPLATE("src", GST_PAD_SRC, GST_PAD_ALWAYS, 
-        GST_STATIC_CAPS("video/x-raw(memory:DMABuf), format=RGBA"));
+        GST_STATIC_CAPS(caps_str));
     
     gst_element_class_add_pad_template(e_class, gst_static_pad_template_get(&sink_t));
     gst_element_class_add_pad_template(e_class, gst_static_pad_template_get(&src_t));

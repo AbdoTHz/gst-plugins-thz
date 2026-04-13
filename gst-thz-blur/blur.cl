@@ -57,3 +57,31 @@ __kernel void blur_image(
 
     dst[index] = (a << 24) | (r << 16) | (g << 8) | b;
 }
+
+
+// Image Mode Kernel (Uses Image2D objects)
+__kernel void blur_image(
+    read_only image2d_t src,
+    write_only image2d_t dst,
+    int strength)
+{
+    const sampler_t sampler = CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP_TO_EDGE | CLK_FILTER_NEAREST;
+    int2 coord = (int2)(get_global_id(0), get_global_id(1));
+    int radius = strength / 8;
+
+    if (radius < 1) {
+        write_imagef(dst, coord, read_imagef(src, sampler, coord));
+        return;
+    }
+
+    float4 sum = (float4)(0.0f);
+    int count = 0;
+
+    for (int dy = -radius; dy <= radius; dy++) {
+        for (int dx = -radius; dx <= radius; dx++) {
+            sum += read_imagef(src, sampler, coord + (int2)(dx, dy));
+            count++;
+        }
+    }
+    write_imagef(dst, coord, sum / (float)count);
+}
