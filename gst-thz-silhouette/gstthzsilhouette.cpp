@@ -36,6 +36,7 @@ G_DEFINE_TYPE(ThzSilhouette, thz_silhouette, GST_TYPE_BASE_TRANSFORM);
 static GstFlowReturn thz_silhouette_transform_ip(GstBaseTransform *trans, GstBuffer *buf) {
     ThzSilhouette *self = THZ_SILHOUETTE(trans);
 
+    // Image Size comes from self->vinfo (negotiated in set_caps)
     if (self->vinfo.width == 0) return GST_FLOW_OK;
 
     try {
@@ -43,32 +44,25 @@ static GstFlowReturn thz_silhouette_transform_ip(GstBaseTransform *trans, GstBuf
         
         for (auto &roi : video_frame.regions()) {
             if (roi.label() == self->target_label) {
+                
+                // 1. Get Bounding Box Location and Size on the source image
+                auto rect = roi.rect(); 
+                
                 for (auto &tensor : roi.tensors()) {
                     if (tensor.format() == "segmentation_mask") {
                         
+                        // 2. Get the Mask Dimensions
                         std::vector<guint> dims = tensor.dims();
-                        std::cout << "[THZ] Tensor Rank (Dimensions count): " << dims.size() << std::endl;
                         guint mask_w = dims[0];
                         guint mask_h = dims[1];
-                        std::vector<float> mask_data = tensor.data<float>();
 
-                        // 1. Print the size as requested
-                        std::cout << "\n[THZ] Mask Size: " << mask_w << " x " << mask_h << std::endl;
-                        
-                        // 2. Iterate and print O for < 0.5 and X for > 0.5
-                        for (guint y = 0; y < mask_h; y++) {
-                            for (guint x = 0; x < mask_w; x++) {
-                                float val = mask_data[y * mask_w + x];
-                                
-                                if (val >= 0.5f) {
-                                    std::cout << "X";
-                                } else {
-                                    std::cout << "O";
-                                }
-                            }
-                            std::cout << "\n"; // New line at the end of each row
-                        }
-                        std::cout << "------------------------------------------" << std::endl;
+                        // 3. Print everything concisely
+                        std::cout << "[THZ] --- Detection Info ---" << std::endl;
+                        std::cout << "  - Source Image: " << self->vinfo.width << "x" << self->vinfo.height << std::endl;
+                        std::cout << "  - ROI Location: x=" << rect.x << ", y=" << rect.y << std::endl;
+                        std::cout << "  - ROI Size:     " << rect.w << "x" << rect.h << std::endl;
+                        std::cout << "  - Mask Size:    " << mask_w << "x" << mask_h << std::endl;
+                        std::cout << "----------------------------" << std::endl;
                     }
                 }
             }
