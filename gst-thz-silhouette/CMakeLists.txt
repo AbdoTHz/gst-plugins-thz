@@ -43,5 +43,3 @@ target_link_libraries(gstthzsilhouette PRIVATE
 )
 
 set_target_properties(gstthzsilhouette PROPERTIES PREFIX "" OUTPUT_NAME "gstthzsilhouette")
-
-install(TARGETS gstthzsilhouette DESTINATION ${GST_PLUGINS_DIR}
