@@ -18,6 +18,7 @@
 // DL Streamer
 #include <dlstreamer/gst/videoanalytics/video_frame.h>
 
+
 #define PACKAGE "thzsilhouette"
 #define GST_TYPE_THZ_SILHOUETTE (thz_silhouette_get_type())
 G_DECLARE_FINAL_TYPE(ThzSilhouette, thz_silhouette, THZ, SILHOUETTE, GstBaseTransform)
@@ -80,7 +81,7 @@ static GstFlowReturn thz_silhouette_transform_ip(GstBaseTransform *trans, GstBuf
         bool has_render = false;
         if (self->overlay_gpu.empty())
                     self->overlay_gpu.create(self->vinfo.height, self->vinfo.width, CV_8UC3);
-        self->overlay_gpu.setTo(cv::Scalar(0, 0, 0));
+        self->overlay_gpu.setTo(1.0);
 
         for (auto &roi : video_frame.regions()) {
             if (roi.label() != self->target_label) continue;
@@ -98,7 +99,7 @@ static GstFlowReturn thz_silhouette_transform_ip(GstBaseTransform *trans, GstBuf
                     cv::Rect bbox = cv::Rect(rect.x, rect.y, rect.w, rect.h) & cv::Rect(0, 0, self->overlay_gpu.cols, self->overlay_gpu.rows);
                     if (bbox.width > 0 && bbox.height > 0) {
                         cv::UMat roi_sub = self->overlay_gpu(bbox);
-                        roi_sub.setTo(cv::Scalar(0, 255, 0), resized_bin_gpu);
+                        roi_sub.setTo(0, resized_bin_gpu);
                     }
                 }
             }
@@ -113,14 +114,9 @@ static GstFlowReturn thz_silhouette_transform_ip(GstBaseTransform *trans, GstBuf
                 cv::va_intel::convertFromVASurface(self->va_display, surface_id, 
                                                   cv::Size(self->vinfo.width, self->vinfo.height), 
                                                   va_frame);
-
-
-                cv::UMat gray, alpha;
-                cv::cvtColor(self->overlay_gpu, gray, cv::COLOR_BGR2GRAY);
-                cv::threshold(gray, alpha, 1, 255, cv::THRESH_BINARY);
-
-                // GPU Blending copy
-                self->overlay_gpu.copyTo(va_frame, alpha);
+                cv::UMat result;
+                cv::multiply(va_frame, self->overlay_gpu, result); 
+                result.copyTo(va_frame);
 
                 cv::va_intel::convertToVASurface(self->va_display, va_frame, surface_id, 
                                                 cv::Size(self->vinfo.width, self->vinfo.height));
