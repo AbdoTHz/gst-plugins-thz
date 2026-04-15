@@ -28,7 +28,6 @@ struct _ThzSilhouette {
     GstVideoInfo vinfo;
     VADisplay va_display;
     gboolean va_initialized;
-    cv::Mat overlay_cpu;
     cv::UMat overlay_gpu;
 };
 
@@ -79,10 +78,9 @@ static GstFlowReturn thz_silhouette_transform_ip(GstBaseTransform *trans, GstBuf
     try {
         GVA::VideoFrame video_frame(buf, &self->vinfo);
         bool has_render = false;
-
-        if (self->overlay_cpu.empty())
-            self->overlay_cpu.create(self->vinfo.height, self->vinfo.width, CV_8UC3);
-        self->overlay_cpu.setTo(cv::Scalar(0, 0, 0));
+        if (self->overlay_gpu.empty())
+                    self->overlay_gpu.create(self->vinfo.height, self->vinfo.width, CV_8UC3);
+        self->overlay_gpu.setTo(cv::Scalar(0, 0, 0));
 
         for (auto &roi : video_frame.regions()) {
             if (roi.label() != self->target_label) continue;
@@ -93,11 +91,15 @@ static GstFlowReturn thz_silhouette_transform_ip(GstBaseTransform *trans, GstBuf
                     auto rect = roi.rect();
                     cv::Mat mask_mat(dims[1], dims[0], CV_32F, (void*)tensor.data<float>().data());
                     mask_mat = (mask_mat > 0.3);
-                    cv::Mat bin;
-                    cv::resize(mask_mat, bin, cv::Size(rect.w, rect.h));
-                    bin.convertTo(bin, CV_8U);
-                    cv::Rect bbox(rect.x, rect.y, rect.w, rect.h);
-                    self->overlay_cpu(bbox).setTo(cv::Scalar(0, 255, 0), bin);
+                    cv::UMat bin_gpu;
+                    mask_mat.copyTo(bin_gpu);
+                    cv::UMat resized_bin_gpu;
+                    cv::resize(bin_gpu, resized_bin_gpu, cv::Size(rect.w, rect.h), 0, 0, cv::INTER_NEAREST);
+                    cv::Rect bbox = cv::Rect(rect.x, rect.y, rect.w, rect.h) & cv::Rect(0, 0, self->overlay_gpu.cols, self->overlay_gpu.rows);
+                    if (bbox.width > 0 && bbox.height > 0) {
+                        cv::UMat roi_sub = self->overlay_gpu(bbox);
+                        roi_sub.setTo(cv::Scalar(0, 255, 0), resized_bin_gpu);
+                    }
                 }
             }
         }
@@ -112,7 +114,6 @@ static GstFlowReturn thz_silhouette_transform_ip(GstBaseTransform *trans, GstBuf
                                                   cv::Size(self->vinfo.width, self->vinfo.height), 
                                                   va_frame);
 
-                self->overlay_cpu.copyTo(self->overlay_gpu);
 
                 cv::UMat gray, alpha;
                 cv::cvtColor(self->overlay_gpu, gray, cv::COLOR_BGR2GRAY);
