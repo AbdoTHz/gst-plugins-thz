@@ -92,9 +92,9 @@ static GstFlowReturn thz_silhouette_transform_ip(GstBaseTransform *trans, GstBuf
                     auto dims = tensor.dims();
                     auto rect = roi.rect();
                     cv::Mat mask_mat(dims[1], dims[0], CV_32F, (void*)tensor.data<float>().data());
+                    mask_mat = (mask_mat > 0.3);
                     cv::Mat bin;
                     cv::resize(mask_mat, bin, cv::Size(rect.w, rect.h));
-                    cv::threshold(bin, bin, 0.5, 255, cv::THRESH_BINARY);
                     bin.convertTo(bin, CV_8U);
                     cv::Rect bbox(rect.x, rect.y, rect.w, rect.h);
                     self->overlay_cpu(bbox).setTo(cv::Scalar(0, 255, 0), bin);
